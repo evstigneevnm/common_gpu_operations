@@ -16,21 +16,6 @@
  *     along with this program.  If not, see <https://www.gnu.org/licenses/>.
  *      */
 
-// This file is part of SimpleCFD.
-
-// SimpleCFD is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, version 2 only of the License.
-
-// SimpleCFD is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU General Public License for more details.
-
-// You should have received a copy of the GNU General Public License
-// along with SimpleCFD.  If not, see <http://www.gnu.org/licenses/>.
-// 
-
 #ifndef __CUSOLVER_WRAP_H__
 #define __CUSOLVER_WRAP_H__
 
@@ -38,14 +23,44 @@
 #include <cuda_runtime.h>
 #include <cusolverDn.h>
 // #include <thrust/complex.h>
-#include <POD/utils/cusolver_safe_call.h>
-#include <POD/utils/cuda_safe_call.h>
+#include <external_libraries/cublas_wrap.h>
+#include <utils/cusolver_safe_call.h>
+#include <utils/cuda_safe_call.h>
 #include <stdexcept>
 
-
-template<class CUBLAS>
 class cusolver_wrap
 {
+    
+//  used for the solution of the linear system
+    using blas_t = cublas_wrap;
+    
+//  simple matrix structure that is RAII
+    template<class T>
+    struct _A_t
+    {
+        T* data_ = nullptr;
+        size_t sz_ = 0;
+        ~_A_t()
+        {
+            if(data_ != nullptr)
+            {
+                cudaFree(data_);
+            }
+        }
+        void init(size_t rows_, size_t cols_, const T* A)
+        {
+            sz_ = rows_*cols_;
+            CUDA_SAFE_CALL(cudaMalloc((void**)&data_, sizeof(T)*sz_) ); 
+            CUDA_SAFE_CALL( cudaMemcpy(data_, A, sizeof(T)*sz_, cudaMemcpyDeviceToDevice) );
+        }
+        T* data()
+        {
+            return data_;
+        }
+
+    };
+
+
 public:
     
     cusolver_wrap(): handle_created(false)
@@ -90,26 +105,165 @@ public:
     template<typename T> //only symmetric matrix is computed, only real eigenvalues
     void eig(size_t rows_cols, T* A, T* lambda); //returns matrix of left eigs in A
 
-    void set_cublas_handle(const CUBLAS* cublas_p_)
+
+
+    void set_cublas(blas_t* cublas_)
     {
+        if(!cublas_set)
+        {
+            cublas = cublas_;
+        }
+        cublas_set = true;
+    }
+
+    template<typename T>
+    void gesv(const size_t rows_cols, T* A, T* b_x)
+    {
+        check_blas();
+        qr_size('T',
+                'L',
+                rows_cols,
+                rows_cols,
+                A,
+                rows_cols,
+                b_x,
+                rows_cols
+                );
+        geqrf_ormqr(
+                'T',
+                'L',
+                rows_cols,
+                rows_cols,
+                A,
+                rows_cols,
+                b_x,
+                rows_cols
+                );
         
-        
-        bool blas_set = true;
+        cublas->trsm('L', 'U', 'N', false, rows_cols, 1, 1.0, A, rows_cols, b_x, rows_cols);
+
+    } 
+
+    template<typename T>
+    void gesv(blas_t* cublas_, const size_t rows_cols, T* A, T* b_x)
+    {
+        set_cublas(cublas_);
+        gesv(rows_cols, A, b_x);
+    }
+
+    template<typename T>
+    void gesv(const size_t rows_cols, T* A, const T* b, T* x)
+    {
+        check_blas();
+        CUDA_SAFE_CALL( cudaMemcpy(x, b, sizeof(T)*rows_cols, cudaMemcpyDeviceToDevice) );
+        gesv(rows_cols, A, x);
+    }
+
+    template<typename T>
+    void gesv(const size_t rows_cols, const T* A, const T* b, T* x)
+    {
+        check_blas();
+        _A_t<T> _A;
+        _A.init(rows_cols,rows_cols,A);
+        gesv(rows_cols, _A.data(), b, x);
+    }
+    template<typename T>
+    void gesv(blas_t* cublas_, const size_t rows_cols, T* A, const T* b, T* x)
+    {
+        set_cublas(cublas_);
+        gesv(rows_cols, A, b, x);
+    }
+
+    template<typename T>
+    void gesv(blas_t* cublas_, const size_t rows_cols, const T* A, const T* b, T* x)
+    {
+        set_cublas(cublas_);
+        gesv(rows_cols, A, b, x);
     }
 
 
-    template<typename T>
-    void gesv(size_t rows_cols, T* A, T* b, T* x);
-
-
-
 private:
-    bool handle_created = false;
 
+    bool handle_created = false;
     cusolverDnHandle_t handle;        
     double* d_work_d = nullptr;
     float* d_work_f = nullptr;
     int work_size = 0;
+    blas_t* cublas;
+    bool cublas_set = false;
+
+    float* tau_f = nullptr; //elementary reflections vector
+    double* tau_d = nullptr; //elementary reflections vector
+    int tau_size = 0;
+
+
+    void check_blas()
+    {
+        if(!cublas_set)
+        {
+            throw std::logic_error("cusolver_wrap::check_blas: cublas handle is not set.");
+        }
+    }
+
+    void free_tau_d()
+    {
+        if(tau_d!=nullptr)
+        {
+            cudaFree(tau_d);
+            tau_d = nullptr;
+        }
+    }
+    void free_tau_f()
+    {
+        if(tau_f!=nullptr)
+        {
+            cudaFree(tau_f);
+            tau_f = nullptr;
+        }
+    }    
+    void set_tau_double(int tau_size_)
+    {
+        if(tau_size<tau_size_)
+        {
+            free_tau_d();
+        }
+        tau_size = tau_size_;
+        CUDA_SAFE_CALL(cudaMalloc((void**)&tau_d, sizeof(double)*tau_size) ); 
+
+    }
+    void set_tau_float(int tau_size_)
+    {
+        if(tau_size<tau_size_)
+        {
+            free_tau_f();
+        }
+        tau_size = tau_size_;
+        CUDA_SAFE_CALL(cudaMalloc((void**)&tau_f, sizeof(float)*tau_size) ); 
+    }
+
+    template<class T>
+    void qr_size(
+                char operation,
+                char side,
+                size_t m,
+                size_t n,
+                const T *A,
+                size_t lda,
+                const T *b,
+                size_t ldb
+                );
+
+    template<class T>
+    void geqrf_ormqr(
+                char operation,
+                char side,
+                size_t m,
+                size_t n,
+                T *A,
+                size_t lda,
+                T *b,
+                size_t ldb
+                );
 
     void cusolver_destroy()
     {
@@ -138,6 +292,7 @@ private:
         if(d_work_d!=nullptr)
         {
             cudaFree(d_work_d);
+            d_work_d = nullptr;
         }        
     }
     void free_d_work_float()
@@ -145,6 +300,7 @@ private:
         if(d_work_f!=nullptr)
         {
             cudaFree(d_work_f);
+            d_work_f = nullptr;
         }        
     }
     void set_d_work_double(int work_size_)
@@ -169,6 +325,267 @@ private:
 };
 
 
+
+template<> inline
+void cusolver_wrap::geqrf_ormqr(char operation_, char side_, size_t rows, size_t cols, double *A, size_t lda, double* b, size_t ldb)
+{
+    int *devInfo = nullptr;
+    CUDA_SAFE_CALL(cudaMalloc ((void**)&devInfo, sizeof(int)) );
+    int info_gpu;
+    CUSOLVER_SAFE_CALL
+    (
+        cusolverDnDgeqrf
+        (
+            handle,
+            (int) rows,
+            (int) cols, 
+            A, 
+            lda, 
+            tau_d, 
+            d_work_d, 
+            work_size, 
+            devInfo
+        )
+    );
+    CUDA_SAFE_CALL( cudaDeviceSynchronize() );
+    CUDA_SAFE_CALL( cudaMemcpy(&info_gpu, devInfo, sizeof(int), cudaMemcpyDeviceToHost) );
+    if(info_gpu != 0)
+    {
+        throw std::runtime_error("cusolver_wrap::geqrf_ormqr.geqrf: info_gpu = " + std::to_string(info_gpu) );
+    }
+    int m = rows;
+    int n = 1;
+    int k = rows;
+    cublasSideMode_t side = CUBLAS_SIDE_LEFT;
+    if((side_ == 'r')||(side_ == 'R'))
+    {
+        side = CUBLAS_SIDE_RIGHT;
+        m = 1;
+        n = cols;
+    }
+    cublasOperation_t trans = CUBLAS_OP_N;
+    if((operation_ == 't')||(operation_ == 'T')) 
+    {
+        trans = CUBLAS_OP_T;
+    }  
+
+    CUSOLVER_SAFE_CALL
+    (    
+        cusolverDnDormqr
+        (
+            handle,
+            side,
+            trans,
+            m,
+            n,
+            k,
+            A,
+            lda,
+            tau_d,
+            b,
+            ldb,
+            d_work_d,
+            work_size,
+            devInfo
+        )
+    );
+    CUDA_SAFE_CALL( cudaDeviceSynchronize() );
+    CUDA_SAFE_CALL( cudaMemcpy(&info_gpu, devInfo, sizeof(int), cudaMemcpyDeviceToHost) );
+    if(info_gpu != 0)
+    {
+        throw std::runtime_error("cusolver_wrap::geqrf_ormqr.ormqr: info_gpu = " + std::to_string(info_gpu) );
+    }    
+
+}
+template<> inline
+void cusolver_wrap::geqrf_ormqr(char operation_, char side_, size_t rows, size_t cols, float *A, size_t lda, float* b, size_t ldb)
+{
+    int *devInfo = nullptr;
+    CUDA_SAFE_CALL(cudaMalloc ((void**)&devInfo, sizeof(int)) );
+    int info_gpu;
+    CUSOLVER_SAFE_CALL
+    (
+        cusolverDnSgeqrf
+        (
+            handle,
+            (int) rows,
+            (int) cols, 
+            A, 
+            lda, 
+            tau_f, 
+            d_work_f, 
+            work_size, 
+            devInfo
+        )
+    );
+    CUDA_SAFE_CALL( cudaDeviceSynchronize() );
+    CUDA_SAFE_CALL( cudaMemcpy(&info_gpu, devInfo, sizeof(int), cudaMemcpyDeviceToHost) );
+    if(info_gpu != 0)
+    {
+        throw std::runtime_error("cusolver_wrap::geqrf_ormqr.geqrf: info_gpu = " + std::to_string(info_gpu) );
+    }
+    int m = rows;
+    int n = 1;
+    int k = rows;
+    cublasSideMode_t side = CUBLAS_SIDE_LEFT;
+    if((side_ == 'r')||(side_ == 'R'))
+    {
+        side = CUBLAS_SIDE_RIGHT;
+        m = 1;
+        n = cols;
+    }
+    cublasOperation_t trans = CUBLAS_OP_N;
+    if((operation_ == 't')||(operation_ == 'T')) 
+    {
+        trans = CUBLAS_OP_T;
+    }  
+
+    CUSOLVER_SAFE_CALL
+    (    
+        cusolverDnSormqr
+        (
+            handle,
+            side,
+            trans,
+            m,
+            n,
+            k,
+            A,
+            lda,
+            tau_f,
+            b,
+            ldb,
+            d_work_f,
+            work_size,
+            devInfo
+        )
+    );
+    CUDA_SAFE_CALL( cudaDeviceSynchronize() );
+    CUDA_SAFE_CALL( cudaMemcpy(&info_gpu, devInfo, sizeof(int), cudaMemcpyDeviceToHost) );
+    if(info_gpu != 0)
+    {
+        throw std::runtime_error("cusolver_wrap::geqrf_ormqr.ormqr: info_gpu = " + std::to_string(info_gpu) );
+    }    
+
+}
+
+template<> inline
+void cusolver_wrap::qr_size(char operation_, char side_, size_t rows, size_t cols, const double *A, size_t lda, const double* b, size_t ldb)
+{
+    
+    int lwork_1 = 0;
+    int lwork_2 = 0;
+    CUSOLVER_SAFE_CALL
+    (
+        cusolverDnDgeqrf_bufferSize
+        (
+            handle,
+            (int) rows,
+            (int) cols,
+            (double*)A,
+            (int) lda,
+            &lwork_1
+        )
+    );
+    
+    int m = rows;
+    int n = 1;
+    int k = rows;
+    cublasSideMode_t side = CUBLAS_SIDE_LEFT;
+    if((side_ == 'r')||(side_ == 'R'))
+    {
+        side = CUBLAS_SIDE_RIGHT;
+        m = 1;
+        n = cols;
+    }
+    cublasOperation_t trans = CUBLAS_OP_N;
+    if((operation_ == 't')||(operation_ == 'T')) 
+    {
+        trans = CUBLAS_OP_T;
+    }
+
+    set_tau_double(int(rows));
+    CUSOLVER_SAFE_CALL
+    (    
+        cusolverDnDormqr_bufferSize
+        (
+            handle,
+            side,
+            trans,
+            m,
+            n,
+            k,
+            A,
+            lda,
+            tau_d,
+            b,
+            (int)ldb,
+            &lwork_2
+        )
+    );
+
+    int lwork = (lwork_1>lwork_2)?lwork_1:lwork_2;
+    set_d_work_double(lwork);
+}
+
+template<> inline
+void cusolver_wrap::qr_size(char operation_, char side_, size_t rows, size_t cols, const float *A, size_t lda, const float* b, size_t ldb)
+{
+    
+    int lwork_1 = 0;
+    int lwork_2 = 0;
+    CUSOLVER_SAFE_CALL
+    (
+        cusolverDnSgeqrf_bufferSize
+        (
+            handle,
+            (int) rows,
+            (int) cols,
+            (float*)A,
+            (int) lda,
+            &lwork_1
+        )
+    );
+    
+    int m = rows;
+    int n = 1;
+    int k = rows;
+    cublasSideMode_t side = CUBLAS_SIDE_LEFT;
+    if((side_ == 'r')||(side_ == 'R'))
+    {
+        side = CUBLAS_SIDE_RIGHT;
+        m = 1;
+        n = cols;
+    }
+    cublasOperation_t trans = CUBLAS_OP_N;
+    if((operation_ == 't')||(operation_ == 'T')) 
+    {
+        trans = CUBLAS_OP_T;
+    }
+
+    set_tau_float(int(rows));
+    CUSOLVER_SAFE_CALL
+    (    
+        cusolverDnSormqr_bufferSize
+        (
+            handle,
+            side,
+            trans,
+            m,
+            n,
+            k,
+            A,
+            lda,
+            tau_f,
+            b,
+            (int)ldb,
+            &lwork_2
+        )
+    );
+
+    int lwork = (lwork_1>lwork_2)?lwork_1:lwork_2;
+    set_d_work_float(lwork);
+}
 
 
 
@@ -223,7 +640,6 @@ void cusolver_wrap::eig(size_t rows_cols, double* A, double* lambda)
     {
         throw std::runtime_error("cusolver_wrap::eig: info_gpu = " + std::to_string(info_gpu) );
     }
-
 }
 
 template<> inline
