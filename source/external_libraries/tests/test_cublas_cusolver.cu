@@ -111,7 +111,7 @@ int main(int argc, char const *argv[])
     //const float beta, 
     //float* C, 
     //size_t LDimC)
-    cublas.gemm('T', 'N', Ncols, Ncols, Nrows, 1.0, Ad, Nrows, Ad, Nrows, 0.0, Cd, Ncols);
+    cublas.gemm('T', 'N', Ncols, Ncols, Nrows, real(1.0), Ad, Nrows, Ad, Nrows, real(0.0), Cd, Ncols);
     device_2_host_cpy(C.data(), Cd, M);    
     std::cout << "C:" << std::endl;
     print_matrix(Ncols, Ncols, C.data() );
@@ -144,7 +144,7 @@ int main(int argc, char const *argv[])
     //const float beta, 
     //float* C, 
     //size_t LDimC)
-    cublas.gemm('N', 'N', Nrows, Nproj, Ncols, 1.0, Ad, Nrows, &Cd[j_proj*Ncols], Ncols, 0.0, eigv_d, Nrows);
+    cublas.gemm('N', 'N', Nrows, Nproj, Ncols, real(1.0), Ad, Nrows, &Cd[j_proj*Ncols], Ncols, real(0.0), eigv_d, Nrows);
     device_2_host_cpy(eigv.data(), eigv_d, Nrows*Nproj);
 
     std::cout << "Eigenvector projections: " << std::endl;
@@ -167,7 +167,7 @@ int main(int argc, char const *argv[])
     host_2_device_cpy<real>(xtr_d, btr.data(), 3);
 
     //A from the left, upper trinagular, no transpose, the diagnial is not unit
-    cublas.trsm('L', 'U', 'N', false, 3, 1, 1.0, Atr_d, 3, xtr_d, 3);
+    cublas.trsm('L', 'U', 'N', false, 3, 1, real(1.0), Atr_d, 3, xtr_d, 3);
     
     std::vector<real> xtr(3, 0.0);
     device_2_host_cpy<real>(xtr.data(), xtr_d, 3);

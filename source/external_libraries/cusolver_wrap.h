@@ -140,7 +140,7 @@ public:
                 rows_cols
                 );
         
-        cublas->trsm('L', 'U', 'N', false, rows_cols, 1, 1.0, A, rows_cols, b_x, rows_cols);
+        cublas->trsm('L', 'U', 'N', false, rows_cols, 1, T(1.0), A, rows_cols, b_x, rows_cols);
 
     } 
 
